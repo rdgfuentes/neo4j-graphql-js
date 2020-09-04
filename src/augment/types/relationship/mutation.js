@@ -5,7 +5,8 @@ import { OperationType } from '../../types/types';
 import {
   TypeWrappers,
   getFieldDefinition,
-  unwrapNamedType
+  isNeo4jIDField,
+  getTypeFields
 } from '../../fields';
 import {
   DirectiveDefinition,
@@ -24,7 +25,8 @@ import {
   buildObjectType,
   buildInputObjectType
 } from '../../ast';
-import { getPrimaryKey } from '../../../utils';
+import { getPrimaryKey } from '../node/selection';
+import { isExternalTypeExtension } from '../../../federation';
 
 /**
  * An enum describing the names of relationship mutations,
@@ -53,6 +55,7 @@ export const augmentRelationshipMutationAPI = ({
   propertyInputValues = [],
   propertyOutputFields = [],
   typeDefinitionMap,
+  typeExtensionDefinitionMap,
   generatedTypeMap,
   operationTypeMap,
   config
@@ -75,10 +78,34 @@ export const augmentRelationshipMutationAPI = ({
         typeName,
         fieldName
       });
-      const fromTypeDefinition = typeDefinitionMap[fromType];
-      const toTypeDefinition = typeDefinitionMap[toType];
-      const fromTypePk = getPrimaryKey(fromTypeDefinition);
-      const toTypePk = getPrimaryKey(toTypeDefinition);
+      const [
+        fromTypeDefinition,
+        isFromServiceType
+      ] = getRelatedNodeTypeDefinition({
+        typeName: fromType,
+        typeDefinitionMap,
+        typeExtensionDefinitionMap
+      });
+      const [toTypeDefinition, isToServiceType] = getRelatedNodeTypeDefinition({
+        typeName: toType,
+        typeDefinitionMap,
+        typeExtensionDefinitionMap
+      });
+
+      const fromFields = getTypeFields({
+        typeName: fromType,
+        definition: fromTypeDefinition,
+        typeExtensionDefinitionMap
+      });
+      const fromTypePk = getPrimaryKey({ fields: fromFields });
+
+      const toFields = getTypeFields({
+        typeName: toType,
+        definition: toTypeDefinition,
+        typeExtensionDefinitionMap
+      });
+      const toTypePk = getPrimaryKey({ fields: toFields });
+
       if (
         !getFieldDefinition({
           fields: mutationType.fields,
@@ -100,12 +127,39 @@ export const augmentRelationshipMutationAPI = ({
           outputType,
           generatedTypeMap,
           operationTypeMap,
+          isFromServiceType,
+          isToServiceType,
           config
         });
       }
     });
   }
   return [typeDefinitionMap, generatedTypeMap, operationTypeMap];
+};
+
+const getRelatedNodeTypeDefinition = ({
+  typeName = '',
+  typeDefinitionMap = {},
+  typeExtensionDefinitionMap = {}
+}) => {
+  let definition = {};
+  let isServiceType = false;
+  if (
+    isExternalTypeExtension({
+      typeName,
+      typeMap: typeDefinitionMap,
+      typeExtensionDefinitionMap
+    })
+  ) {
+    const typeExtensions = typeExtensionDefinitionMap[typeName];
+    if (typeExtensions && typeExtensions.length) {
+      definition = typeExtensions[0];
+      isServiceType = true;
+    }
+  } else {
+    definition = typeDefinitionMap[typeName];
+  }
+  return [definition, isServiceType];
 };
 
 /**
@@ -155,38 +209,42 @@ const buildRelationshipMutationAPI = ({
   outputType,
   generatedTypeMap,
   operationTypeMap,
+  isFromServiceType,
+  isToServiceType,
   config
 }) => {
-  const mutationOutputType = `_${mutationName}Payload`;
-  operationTypeMap = buildRelationshipMutationField({
-    mutationAction,
-    mutationName,
-    relationshipName,
-    fromType,
-    toType,
-    propertyInputValues,
-    propertyOutputFields,
-    mutationOutputType,
-    outputType,
-    operationTypeMap,
-    config
-  });
-  generatedTypeMap = buildRelationshipMutationPropertyInputType({
-    mutationAction,
-    outputType,
-    propertyInputValues,
-    generatedTypeMap
-  });
-  generatedTypeMap = buildRelationshipMutationOutputType({
-    mutationAction,
-    mutationOutputType,
-    propertyInputValues,
-    propertyOutputFields,
-    relationshipName,
-    fromType,
-    toType,
-    generatedTypeMap
-  });
+  if (!isFromServiceType && !isToServiceType) {
+    const mutationOutputType = `_${mutationName}Payload`;
+    operationTypeMap = buildRelationshipMutationField({
+      mutationAction,
+      mutationName,
+      relationshipName,
+      fromType,
+      toType,
+      propertyInputValues,
+      propertyOutputFields,
+      mutationOutputType,
+      outputType,
+      operationTypeMap,
+      config
+    });
+    generatedTypeMap = buildRelationshipMutationPropertyInputType({
+      mutationAction,
+      outputType,
+      propertyInputValues,
+      generatedTypeMap
+    });
+    generatedTypeMap = buildRelationshipMutationOutputType({
+      mutationAction,
+      mutationOutputType,
+      propertyInputValues,
+      propertyOutputFields,
+      relationshipName,
+      fromType,
+      toType,
+      generatedTypeMap
+    });
+  }
   return [operationTypeMap, generatedTypeMap];
 };
 
@@ -282,7 +340,7 @@ const buildRelationshipMutationPropertyInputType = ({
         directives: field.directives,
         name: DirectiveDefinition.CYPHER
       });
-      return !cypherDirective;
+      return !cypherDirective && !isNeo4jIDField({ name: field.name });
     });
     const inputTypeName = `_${outputType}Input`;
     generatedTypeMap[inputTypeName] = buildInputObjectType({

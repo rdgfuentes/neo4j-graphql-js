@@ -22,10 +22,15 @@ export function cypherTestRunner(
 type Mutation {
     CreateGenre(name: String): Genre @cypher(statement: "CREATE (g:Genre) SET g.name = $name RETURN g")
     CreateMovie(movieId: ID, title: String, year: Int, plot: String, poster: String, imdbRating: Float, released: DateTime): Movie
-    CreateState(name: String!): State
+    CreateState(name: String!, id: ID): State
+    CreateUniqueNode(string: String, id: ID, anotherId: ID): UniqueNode @hasScope(scopes: ["UniqueNode: Create"])
+    MergeUniqueStringNode(id: ID, uniqueString: String!): UniqueStringNode @hasScope(scopes: ["UniqueStringNode: Merge"])
+    DeleteUniqueStringNode(uniqueString: String!): UniqueStringNode @hasScope(scopes: ["UniqueStringNode: Delete"])
     UpdateMovie(movieId: ID!, title: String, year: Int, plot: String, poster: String, imdbRating: Float): Movie
     DeleteMovie(movieId: ID!): Movie
     MergeUser(userId: ID!, name: String): User
+    MergeBook(genre: BookGenre!): Book
+    MergeNodeTypeMutationTest(NodeTypeMutationTest: BookGenre!): NodeTypeMutationTest
     currentUserId: String @cypher(statement: "RETURN $cypherParams.currentUserId")
     computedObjectWithCypherParams: currentUserId @cypher(statement: "RETURN { userId: $cypherParams.currentUserId }")
     computedStringList: [String] @cypher(statement: "UNWIND ['hello', 'world'] AS stringList RETURN stringList")
@@ -63,6 +68,7 @@ type Mutation {
       Books: checkCypherQuery,
       State: checkCypherQuery,
       Camera: checkCypherQuery,
+      Person: checkCypherQuery,
       CustomCameras: checkCypherQuery,
       CustomCamera: checkCypherQuery,
       computedBoolean: checkCypherQuery,
@@ -83,9 +89,14 @@ type Mutation {
       CreateMovie: checkCypherMutation,
       CreateActor: checkCypherMutation,
       CreateState: checkCypherMutation,
+      CreateUniqueNode: checkCypherMutation,
+      DeleteUniqueStringNode: checkCypherMutation,
       UpdateMovie: checkCypherMutation,
       DeleteMovie: checkCypherMutation,
       MergeUser: checkCypherMutation,
+      MergeBook: checkCypherMutation,
+      MergeNodeTypeMutationTest: checkCypherMutation,
+      MergeUniqueStringNode: checkCypherMutation,
       currentUserId: checkCypherMutation,
       computedObjectWithCypherParams: checkCypherMutation,
       computedStringList: checkCypherMutation,
@@ -165,8 +176,10 @@ export function augmentedSchemaCypherTestRunner(
 
   const resolvers = {
     QueryA: {
+      Person: checkCypherQuery,
       Actor: checkCypherQuery,
       User: checkCypherQuery,
+      Genre: checkCypherQuery,
       Movie: checkCypherQuery,
       MoviesByYear: checkCypherQuery,
       MoviesByYears: checkCypherQuery,
@@ -188,6 +201,8 @@ export function augmentedSchemaCypherTestRunner(
       State: checkCypherQuery,
       CasedType: checkCypherQuery,
       Camera: checkCypherQuery,
+      Person: checkCypherQuery,
+      NewCamera: checkCypherQuery,
       CustomCameras: checkCypherQuery,
       CustomCamera: checkCypherQuery,
       computedBoolean: checkCypherQuery,
@@ -207,6 +222,14 @@ export function augmentedSchemaCypherTestRunner(
       CreateMovie: checkCypherMutation,
       CreateActor: checkCypherMutation,
       CreateState: checkCypherMutation,
+      CreateUniqueNode: checkCypherMutation,
+      DeleteUniqueStringNode: checkCypherMutation,
+      AddUniqueNodeTestRelation: checkCypherMutation,
+      MergeUniqueNodeTestRelation: checkCypherMutation,
+      RemoveUniqueNodeTestRelation: checkCypherMutation,
+      MergeBook: checkCypherMutation,
+      MergeNodeTypeMutationTest: checkCypherMutation,
+      MergeUniqueStringNode: checkCypherMutation,
       CreateTemporalNode: checkCypherMutation,
       UpdateTemporalNode: checkCypherMutation,
       DeleteTemporalNode: checkCypherMutation,
@@ -240,7 +263,12 @@ export function augmentedSchemaCypherTestRunner(
       CustomCamera: checkCypherMutation,
       CustomCameras: checkCypherMutation,
       CreateNewCamera: checkCypherMutation,
-      computedMovieSearch: checkCypherMutation
+      computedMovieSearch: checkCypherMutation,
+      AddActorInterfacedRelationshipType: checkCypherMutation,
+      RemoveActorInterfacedRelationshipType: checkCypherMutation,
+      MergeActorInterfacedRelationshipType: checkCypherMutation,
+      UpdateActorInterfacedRelationshipType: checkCypherMutation,
+      MergeGenreInterfacedRelationshipType: checkCypherMutation
     }
   };
 

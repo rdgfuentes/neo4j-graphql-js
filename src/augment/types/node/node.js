@@ -1,4 +1,3 @@
-import { Kind } from 'graphql';
 import {
   augmentNodeQueryAPI,
   augmentNodeQueryArgumentTypes,
@@ -12,7 +11,8 @@ import {
   TypeWrappers,
   unwrapNamedType,
   isPropertyTypeField,
-  buildNeo4jSystemIDField
+  buildNeo4jSystemIDField,
+  getTypeFields
 } from '../../fields';
 import {
   FilteringArgument,
@@ -24,7 +24,11 @@ import {
   getRelationName,
   getDirective,
   isIgnoredField,
-  DirectiveDefinition
+  isPrimaryKeyField,
+  isUniqueField,
+  isIndexedField,
+  DirectiveDefinition,
+  validateFieldDirectives
 } from '../../directives';
 import {
   buildName,
@@ -37,9 +41,12 @@ import {
   isNodeType,
   isRelationshipType,
   isQueryTypeDefinition,
-  isUnionTypeDefinition
+  isUnionTypeDefinition,
+  isObjectTypeExtensionDefinition,
+  isInterfaceTypeExtensionDefinition
 } from '../../types/types';
-import { getPrimaryKey } from '../../../utils';
+import { getPrimaryKey } from './selection';
+import { ApolloError } from 'apollo-server-errors';
 
 /**
  * The main export for the augmentation process of a GraphQL
@@ -69,9 +76,12 @@ export const augmentNodeType = ({
     if (typeExtensions.length) {
       typeExtensionDefinitionMap[typeName] = typeExtensions.map(extension => {
         let isIgnoredType = false;
-        const isObjectExtension = extension.kind === Kind.OBJECT_TYPE_EXTENSION;
-        const isInterfaceExtension =
-          extension.kind === Kind.INTERFACE_TYPE_EXTENSION;
+        const isObjectExtension = isObjectTypeExtensionDefinition({
+          definition: extension
+        });
+        const isInterfaceExtension = isInterfaceTypeExtensionDefinition({
+          definition: extension
+        });
         if (isObjectExtension || isInterfaceExtension) {
           [
             extensionNodeInputTypeMap,
@@ -82,6 +92,7 @@ export const augmentNodeType = ({
             typeName,
             definition: extension,
             typeDefinitionMap,
+            typeExtensionDefinitionMap,
             generatedTypeMap,
             operationTypeMap,
             nodeInputTypeMap: extensionNodeInputTypeMap,
@@ -110,6 +121,7 @@ export const augmentNodeType = ({
       isUnionType,
       isQueryType,
       typeDefinitionMap,
+      typeExtensionDefinitionMap,
       generatedTypeMap,
       operationTypeMap,
       nodeInputTypeMap,
@@ -128,10 +140,8 @@ export const augmentNodeType = ({
     if (!isIgnoredType) {
       if (!isOperationType && !isInterfaceType && !isUnionType) {
         [propertyOutputFields, nodeInputTypeMap] = buildNeo4jSystemIDField({
-          definition,
           typeName,
           propertyOutputFields,
-          operationTypeMap,
           nodeInputTypeMap,
           config
         });
@@ -178,6 +188,7 @@ export const augmentNodeTypeFields = ({
   isUnionType,
   isQueryType,
   typeDefinitionMap,
+  typeExtensionDefinitionMap,
   generatedTypeMap,
   operationTypeMap,
   nodeInputTypeMap = {},
@@ -190,12 +201,13 @@ export const augmentNodeTypeFields = ({
   config
 }) => {
   let isIgnoredType = true;
+  let filterTypeName = `_${typeName}Filter`;
+  const fields = definition.fields;
   if (!isUnionType && !isUnionExtension) {
-    const fields = definition.fields;
     if (!isQueryType) {
       if (!nodeInputTypeMap[FilteringArgument.FILTER]) {
         nodeInputTypeMap[FilteringArgument.FILTER] = {
-          name: `_${typeName}Filter`,
+          name: filterTypeName,
           fields: []
         };
       }
@@ -206,15 +218,12 @@ export const augmentNodeTypeFields = ({
         };
       }
     }
-    if (fields === undefined) {
-      console.log('\ndefinition: ', definition);
-      console.log('fields: ', fields);
-    }
     propertyOutputFields = fields.reduce((outputFields, field) => {
       let fieldType = field.type;
       let fieldArguments = field.arguments;
       const fieldDirectives = field.directives;
-      if (!isIgnoredField({ directives: fieldDirectives })) {
+      const isIgnored = isIgnoredField({ directives: fieldDirectives });
+      if (!isIgnored) {
         isIgnoredType = false;
         const fieldName = field.name.value;
         const unwrappedType = unwrapNamedType({ type: fieldType });
@@ -234,6 +243,10 @@ export const augmentNodeTypeFields = ({
             type: outputType
           })
         ) {
+          validateFieldDirectives({
+            fields,
+            directives: fieldDirectives
+          });
           nodeInputTypeMap = augmentInputTypePropertyFields({
             inputTypeMap: nodeInputTypeMap,
             fieldName,
@@ -264,13 +277,14 @@ export const augmentNodeTypeFields = ({
             outputType,
             nodeInputTypeMap,
             typeDefinitionMap,
+            typeExtensionDefinitionMap,
             generatedTypeMap,
             operationTypeMap,
-            config,
             relationshipDirective,
             outputTypeWrappers,
             isObjectExtension,
-            isInterfaceExtension
+            isInterfaceExtension,
+            config
           });
         } else if (isRelationshipType({ definition: outputDefinition })) {
           [
@@ -292,8 +306,11 @@ export const augmentNodeTypeFields = ({
             outputDefinition,
             nodeInputTypeMap,
             typeDefinitionMap,
+            typeExtensionDefinitionMap,
             generatedTypeMap,
             operationTypeMap,
+            isObjectExtension,
+            isInterfaceExtension,
             config
           });
         }
@@ -305,21 +322,22 @@ export const augmentNodeTypeFields = ({
       });
       return outputFields;
     }, []);
-
-    if (!isQueryType && extensionNodeInputTypeMap) {
-      if (extensionNodeInputTypeMap[FilteringArgument.FILTER]) {
-        const extendedFilteringFields =
-          extensionNodeInputTypeMap[FilteringArgument.FILTER].fields;
-        nodeInputTypeMap[FilteringArgument.FILTER].fields.push(
-          ...extendedFilteringFields
-        );
-      }
-      if (extensionNodeInputTypeMap[OrderingArgument.ORDER_BY]) {
-        const extendedOrderingValues =
-          extensionNodeInputTypeMap[OrderingArgument.ORDER_BY].values;
-        nodeInputTypeMap[OrderingArgument.ORDER_BY].values.push(
-          ...extendedOrderingValues
-        );
+    if (!isObjectExtension && !isInterfaceExtension) {
+      if (!isQueryType && extensionNodeInputTypeMap) {
+        if (extensionNodeInputTypeMap[FilteringArgument.FILTER]) {
+          const extendedFilteringFields =
+            extensionNodeInputTypeMap[FilteringArgument.FILTER].fields;
+          nodeInputTypeMap[FilteringArgument.FILTER].fields.push(
+            ...extendedFilteringFields
+          );
+        }
+        if (extensionNodeInputTypeMap[OrderingArgument.ORDER_BY]) {
+          const extendedOrderingValues =
+            extensionNodeInputTypeMap[OrderingArgument.ORDER_BY].values;
+          nodeInputTypeMap[OrderingArgument.ORDER_BY].values.push(
+            ...extendedOrderingValues
+          );
+        }
       }
     }
   } else {
@@ -347,14 +365,28 @@ const augmentNodeTypeField = ({
   outputType,
   nodeInputTypeMap,
   typeDefinitionMap,
+  typeExtensionDefinitionMap,
   generatedTypeMap,
   operationTypeMap,
   config,
   relationshipDirective,
-  outputTypeWrappers,
-  isObjectExtension,
-  isInterfaceExtension
+  outputTypeWrappers
 }) => {
+  const isPrimaryKey = isPrimaryKeyField({ directives: fieldDirectives });
+  const isUnique = isUniqueField({ directives: fieldDirectives });
+  const isIndex = isIndexedField({ directives: fieldDirectives });
+  if (isPrimaryKey)
+    throw new ApolloError(
+      `The @id directive cannot be used on @relation fields.`
+    );
+  if (isUnique)
+    throw new ApolloError(
+      `The @unique directive cannot be used on @relation fields.`
+    );
+  if (isIndex)
+    throw new ApolloError(
+      `The @index directive cannot be used on @relation fields.`
+    );
   const isUnionType = isUnionTypeDefinition({ definition: outputDefinition });
   fieldArguments = augmentNodeTypeFieldArguments({
     fieldArguments,
@@ -365,19 +397,11 @@ const augmentNodeTypeField = ({
     typeDefinitionMap,
     config
   });
-  if (!isUnionType && !isObjectExtension && !isInterfaceExtension) {
+  if (!isUnionType) {
     if (
       relationshipDirective &&
       !isQueryTypeDefinition({ definition, operationTypeMap })
     ) {
-      nodeInputTypeMap = augmentNodeQueryArgumentTypes({
-        typeName,
-        fieldName,
-        outputType,
-        outputTypeWrappers,
-        nodeInputTypeMap,
-        config
-      });
       const relationshipName = getRelationName(relationshipDirective);
       const relationshipDirection = getRelationDirection(relationshipDirective);
       // Assume direction OUT
@@ -388,6 +412,14 @@ const augmentNodeTypeField = ({
         fromType = outputType;
         toType = temp;
       }
+      nodeInputTypeMap = augmentNodeQueryArgumentTypes({
+        typeName,
+        fieldName,
+        outputType,
+        outputTypeWrappers,
+        nodeInputTypeMap,
+        config
+      });
       [
         typeDefinitionMap,
         generatedTypeMap,
@@ -400,6 +432,7 @@ const augmentNodeTypeField = ({
         toType,
         relationshipName,
         typeDefinitionMap,
+        typeExtensionDefinitionMap,
         generatedTypeMap,
         operationTypeMap,
         config
@@ -451,6 +484,7 @@ const augmentNodeTypeAPI = ({
       typeName,
       propertyInputValues,
       generatedTypeMap,
+      typeExtensionDefinitionMap,
       config
     });
   }
@@ -483,12 +517,18 @@ const buildNodeSelectionInputType = ({
   typeName,
   propertyInputValues,
   generatedTypeMap,
+  typeExtensionDefinitionMap,
   config
 }) => {
   const mutationTypeName = OperationType.MUTATION;
   const mutationTypeNameLower = mutationTypeName.toLowerCase();
   if (shouldAugmentType(config, mutationTypeNameLower, typeName)) {
-    const primaryKey = getPrimaryKey(definition);
+    const fields = getTypeFields({
+      typeName,
+      definition,
+      typeExtensionDefinitionMap
+    });
+    const primaryKey = getPrimaryKey({ fields });
     const propertyInputName = `_${typeName}Input`;
     if (primaryKey) {
       const primaryKeyName = primaryKey.name.value;

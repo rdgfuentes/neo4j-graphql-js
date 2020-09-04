@@ -1,12 +1,26 @@
 import { gql } from 'apollo-server';
 
-export const testSchema = `
+export const testSchema = `  
+  """
+  Directive definition
+  block
+  description
+  """
+  directive @cypher(statement: String) on FIELD_DEFINITION
+
+  "Object type line description"
   type Movie
     @additionalLabels(
       labels: ["u_<%= $cypherParams.userId %>", "newMovieLabel"]
     ) {
     _id: String
-    movieId: ID!
+    "Field line description"
+    movieId: ID! @id
+    """
+    Field
+    block
+    description
+    """
     title: String @isAuthenticated
     someprefix_title_with_underscores: String
     year: Int
@@ -14,6 +28,7 @@ export const testSchema = `
     plot: String
     poster: String
     imdbRating: Float
+    "@relation field line description"
     genres: [Genre] @relation(name: "IN_GENRE", direction: "OUT")
     similar(first: Int = 3, offset: Int = 0): [Movie]
       @cypher(
@@ -40,6 +55,7 @@ export const testSchema = `
       @cypher(
         statement: "MATCH (this)-[:ACTED_IN*2]-(other:Movie) RETURN other"
       )
+    "@relation type field line description"      
     ratings(
       rating: Int
       time: Time
@@ -52,22 +68,22 @@ export const testSchema = `
     years: [Int]
     titles: [String]
     imdbRatings: [Float]
+    "Temporal type field line description"
     releases: [DateTime]
+    "Ignored field line description"
     customField: String @neo4j_ignore
   }
-
-  extend type Movie {
+  
+  extend type Movie @hasRole(roles: [admin]) {
     currentUserId(strArg: String): String
       @cypher(
         statement: "RETURN $cypherParams.currentUserId AS cypherParamsUserId"
       )
+    "Object type extension field line description"
     interfaceNoScalars(
       orderBy: _InterfaceNoScalarsOrdering
     ): [InterfaceNoScalars]
       @relation(name: "INTERFACE_NO_SCALARS", direction: OUT)
-  }
-
-  extend type Movie @hasRole(roles: [admin]) {
     extensionScalar: String
     extensionNode: [Genre] @relation(name: "IN_GENRE", direction: "OUT")
   }
@@ -81,29 +97,61 @@ export const testSchema = `
       @cypher(
         statement: "MATCH (m:Movie)-[:IN_GENRE]->(this) RETURN m ORDER BY m.imdbRating DESC LIMIT 1"
       )
+    interfacedRelationshipType: [InterfacedRelationshipType]
   }
 
   type State {
     customField: String @neo4j_ignore
-    name: String!
+    name: String! @index
+    id: ID
   }
 
+  """
+  Interface type
+  block description
+  """
   interface Person {
-    userId: ID!
     name: String
+    interfacedRelationshipType: [InterfacedRelationshipType]
+    userId: ID! @id
+    reflexiveInterfacedRelationshipType: [ReflexiveInterfacedRelationshipType]    
+  }
+
+  type ReflexiveInterfacedRelationshipType @relation(name: "REFLEXIVE_INTERFACED_RELATIONSHIP_TYPE") {
+    from: Person!
+    boolean: Boolean
+    to: Person!
+  }
+
+  type InterfacedRelationshipType @relation(name: "INTERFACED_RELATIONSHIP_TYPE") {
+    from: Person!
+    string: String!
+    boolean: Boolean
+    to: Genre!
   }
 
   extend interface Person {
     extensionScalar: String
   }
-
+  
+  "Enum type line description"
   enum _PersonOrdering {
+    "Enum value line description"
     userId_asc
+    """
+    Enum value
+    block
+    description
+    """
     userId_desc
     name_asc
     name_desc
   }
 
+  """
+  Custom filtering input type
+  block description
+  """
   input _PersonFilter {
     AND: [_PersonFilter!]
     OR: [_PersonFilter!]
@@ -129,6 +177,104 @@ export const testSchema = `
     name_not_starts_with: String
     name_ends_with: String
     name_not_ends_with: String
+    interfacedRelationshipType: _PersonInterfacedRelationshipTypeFilter
+    interfacedRelationshipType_not: _PersonInterfacedRelationshipTypeFilter
+    interfacedRelationshipType_in: [_PersonInterfacedRelationshipTypeFilter!]
+    interfacedRelationshipType_not_in: [_PersonInterfacedRelationshipTypeFilter!]
+    interfacedRelationshipType_some: _PersonInterfacedRelationshipTypeFilter
+    interfacedRelationshipType_none: _PersonInterfacedRelationshipTypeFilter
+    interfacedRelationshipType_single: _PersonInterfacedRelationshipTypeFilter
+    interfacedRelationshipType_every: _PersonInterfacedRelationshipTypeFilter
+    reflexiveInterfacedRelationshipType: _ReflexiveInterfacedRelationshipTypeDirectionsFilter
+    reflexiveInterfacedRelationshipType_not: _ReflexiveInterfacedRelationshipTypeDirectionsFilter
+    reflexiveInterfacedRelationshipType_in: [_ReflexiveInterfacedRelationshipTypeDirectionsFilter!]
+    reflexiveInterfacedRelationshipType_not_in: [_ReflexiveInterfacedRelationshipTypeDirectionsFilter!]
+    reflexiveInterfacedRelationshipType_some: _ReflexiveInterfacedRelationshipTypeDirectionsFilter
+    reflexiveInterfacedRelationshipType_none: _ReflexiveInterfacedRelationshipTypeDirectionsFilter
+    reflexiveInterfacedRelationshipType_single: _ReflexiveInterfacedRelationshipTypeDirectionsFilter
+    reflexiveInterfacedRelationshipType_every: _ReflexiveInterfacedRelationshipTypeDirectionsFilter
+    extensionScalar: String
+    extensionScalar_not: String
+    extensionScalar_in: [String!]
+    extensionScalar_not_in: [String!]
+    extensionScalar_contains: String
+    extensionScalar_not_contains: String
+    extensionScalar_starts_with: String
+    extensionScalar_not_starts_with: String
+    extensionScalar_ends_with: String
+    extensionScalar_not_ends_with: String
+  }
+  
+  input _PersonInterfacedRelationshipTypeFilter {
+    AND: [_PersonInterfacedRelationshipTypeFilter!]
+    OR: [_PersonInterfacedRelationshipTypeFilter!]
+    string: String
+    string_not: String
+    string_in: [String!]
+    string_not_in: [String!]
+    string_contains: String
+    string_not_contains: String
+    string_starts_with: String
+    string_not_starts_with: String
+    string_ends_with: String
+    string_not_ends_with: String
+    boolean: Boolean
+    boolean_not: Boolean
+    Genre: _GenreFilter
+  }
+  
+  input _GenreFilter {
+    AND: [_GenreFilter!]
+    OR: [_GenreFilter!]
+    name: String
+    name_not: String
+    name_in: [String!]
+    name_not_in: [String!]
+    name_contains: String
+    name_not_contains: String
+    name_starts_with: String
+    name_not_starts_with: String
+    name_ends_with: String
+    name_not_ends_with: String
+    interfacedRelationshipType: _GenreInterfacedRelationshipTypeFilter
+    interfacedRelationshipType_not: _GenreInterfacedRelationshipTypeFilter
+    interfacedRelationshipType_in: [_GenreInterfacedRelationshipTypeFilter!]
+    interfacedRelationshipType_not_in: [_GenreInterfacedRelationshipTypeFilter!]
+    interfacedRelationshipType_some: _GenreInterfacedRelationshipTypeFilter
+    interfacedRelationshipType_none: _GenreInterfacedRelationshipTypeFilter
+    interfacedRelationshipType_single: _GenreInterfacedRelationshipTypeFilter
+    interfacedRelationshipType_every: _GenreInterfacedRelationshipTypeFilter
+  }
+
+  input _GenreInterfacedRelationshipTypeFilter {
+    AND: [_GenreInterfacedRelationshipTypeFilter!]
+    OR: [_GenreInterfacedRelationshipTypeFilter!]
+    string: String
+    string_not: String
+    string_in: [String!]
+    string_not_in: [String!]
+    string_contains: String
+    string_not_contains: String
+    string_starts_with: String
+    string_not_starts_with: String
+    string_ends_with: String
+    string_not_ends_with: String
+    boolean: Boolean
+    boolean_not: Boolean
+    Person: _PersonFilter
+  }
+  
+  input _ReflexiveInterfacedRelationshipTypeDirectionsFilter {
+    from: _ReflexiveInterfacedRelationshipTypeFilter
+    to: _ReflexiveInterfacedRelationshipTypeFilter
+  }
+  
+  input _ReflexiveInterfacedRelationshipTypeFilter {
+    AND: [_ReflexiveInterfacedRelationshipTypeFilter!]
+    OR: [_ReflexiveInterfacedRelationshipTypeFilter!]
+    boolean: Boolean
+    boolean_not: Boolean
+    Person: _PersonFilter
   }
 
   type Actor {
@@ -137,6 +283,9 @@ export const testSchema = `
     movies: [Movie] @relation(name: "ACTED_IN", direction: "OUT")
     knows: [Person] @relation(name: "KNOWS", direction: "OUT")
     extensionScalar: String
+    interfacedRelationshipType: [InterfacedRelationshipType]
+    reflexiveInterfacedRelationshipType: [ReflexiveInterfacedRelationshipType]    
+    _id: String
   }
 
   extend type Actor implements Person
@@ -144,6 +293,8 @@ export const testSchema = `
   type User implements Person {
     userId: ID!
     name: String
+    interfacedRelationshipType: [InterfacedRelationshipType]
+    reflexiveInterfacedRelationshipType: [ReflexiveInterfacedRelationshipType]
     currentUserId(strArg: String = "Neo4j", strInputArg: strInput): String
       @cypher(
         statement: "RETURN $cypherParams.currentUserId AS cypherParamsUserId"
@@ -205,6 +356,7 @@ export const testSchema = `
     localdatetime: LocalDateTime
     datetimes: [DateTime]
     location: Point
+    _id: String
     to: Movie
   }
 
@@ -220,16 +372,31 @@ export const testSchema = `
   type Book {
     genre: BookGenre
   }
+  
+  type NodeTypeMutationTest {
+    NodeTypeMutationTest: BookGenre
+  }
 
+  """
+  Custom ordering enum type
+  block description
+  """  
   enum _GenreOrdering {
     name_desc
     name_asc
   }
-
+  
+  "Query type line description"
   type QueryA {
+    "Object type query field line description"
     Movie(
       _id: String
+      "Query field argument line description"
       movieId: ID
+      """
+      Query field argument
+      block description
+      """
       title: String
       year: Int
       released: DateTime
@@ -240,6 +407,11 @@ export const testSchema = `
       first: Int
       offset: Int
     ): [Movie]
+    """
+    Query field
+    block
+    description
+    """
     MoviesByYear(year: Int): [Movie]
     MoviesByYears(year: [Int]): [Movie]
     MovieById(movieId: ID!): Movie
@@ -275,28 +447,46 @@ export const testSchema = `
     customWithArguments(strArg: String, strInputArg: strInput): String
       @cypher(statement: "RETURN $strInputArg.strArg")
     CasedType: [CasedType]
+    "Interface type query field line description"
     Camera(
       type: String
       first: Int
       orderBy: _CameraOrdering
       filter: _CameraFilter
     ): [Camera]
+    Person(
+      userId: ID
+      name: String
+      extensionScalar: String
+      _id: String
+      first: Int
+      offset: Int
+      orderBy: [_PersonOrdering]
+      filter: _PersonFilter
+    ): [Person]
     InterfaceNoScalars(
       orderBy: _InterfaceNoScalarsOrdering
     ): [InterfaceNoScalars]
     CustomCameras: [Camera] @cypher(statement: "MATCH (c:Camera) RETURN c")
     CustomCamera: Camera @cypher(statement: "MATCH (c:Camera) RETURN c")
   }
-
+  
   extend type QueryA {
     MovieSearch(first: Int): [MovieSearch]
     computedMovieSearch: [MovieSearch]
       @cypher(statement: "MATCH (ms:MovieSearch) RETURN ms")
   }
 
+  "Mutation  type line description"
   type Mutation {
+    "Mutation  field line description"
     currentUserId: String
       @cypher(statement: "RETURN $cypherParams.currentUserId")
+    """
+    Mutation  field
+    block
+    description
+    """
     computedObjectWithCypherParams: currentUserId
       @cypher(statement: "RETURN { userId: $cypherParams.currentUserId }")
     computedTemporal: DateTime
@@ -311,7 +501,14 @@ export const testSchema = `
       @cypher(
         statement: "UNWIND ['hello', 'world'] AS stringList RETURN stringList"
       )
-    customWithArguments(strArg: String, strInputArg: strInput): String
+    customWithArguments(
+      """
+      Mutation field argument
+      block description
+      """
+      strArg: String,
+      strInputArg: strInput
+    ): String
       @cypher(statement: "RETURN $strInputArg.strArg")
     testPublish: Boolean @neo4j_ignore
     computedMovieSearch: [MovieSearch]
@@ -362,15 +559,16 @@ export const testSchema = `
     ignoredField: String @neo4j_ignore
   }
 
+  "Custom scalar type line description"
   scalar Time
   scalar Date
   scalar DateTime
   scalar LocalTime
   scalar LocalDateTime
-
-  extend scalar Time @neo4j_ignore
-
+  
+  "Input object type line description"
   input strInput {
+    "Input field line description"
     strArg: String
   }
 
@@ -452,8 +650,8 @@ export const testSchema = `
   }
 
   interface Camera {
-    id: ID!
     type: String
+    id: ID! @unique
     make: String
     weight: Int
     operators(
@@ -464,6 +662,7 @@ export const testSchema = `
     ): [Person] @relation(name: "cameras", direction: IN)
     computedOperators(name: String): [Person]
       @cypher(statement: "MATCH (this)<-[:cameras]-(p:Person) RETURN p")
+    reflexiveInterfaceRelationship: [Camera] @relation(name: "REFLEXIVE_INTERFACE_RELATIONSHIP", direction: OUT)
   }
 
   enum _CameraOrdering {
@@ -478,8 +677,8 @@ export const testSchema = `
   }
 
   type OldCamera implements Camera {
-    id: ID!
     type: String
+    id: ID! @unique
     make: String
     weight: Int
     smell: String
@@ -491,11 +690,12 @@ export const testSchema = `
     ): [Person] @relation(name: "cameras", direction: IN)
     computedOperators(name: String): [Person]
       @cypher(statement: "MATCH (this)<-[:cameras]-(p:Person) RETURN p")
+    reflexiveInterfaceRelationship: [Camera] @relation(name: "REFLEXIVE_INTERFACE_RELATIONSHIP", direction: OUT)
   }
 
   type NewCamera implements Camera {
-    id: ID!
     type: String
+    id: ID! @unique
     make: String
     weight: Int
     features: [String]
@@ -507,8 +707,13 @@ export const testSchema = `
     ): [Person] @relation(name: "cameras", direction: IN)
     computedOperators(name: String): [Person]
       @cypher(statement: "MATCH (this)<-[:cameras]-(p:Person) RETURN p")
+    reflexiveInterfaceRelationship: [Camera] @relation(name: "REFLEXIVE_INTERFACE_RELATIONSHIP", direction: OUT)      
   }
 
+  """
+  Union type
+  block description
+  """
   union MovieSearch = Movie | Genre | Book
 
   extend union MovieSearch = Actor | OldCamera
@@ -524,6 +729,27 @@ export const testSchema = `
     cameras: [Camera!]! @relation(name: "cameras", direction: "OUT")
     cameraBuddy: Person @relation(name: "cameraBuddy", direction: "OUT")
     extensionScalar: String
+    interfacedRelationshipType: [InterfacedRelationshipType]
+    reflexiveInterfacedRelationshipType: [ReflexiveInterfacedRelationshipType]
+  }
+
+  # Normal primary key field selection applied to use the id field
+  type UniqueNode {
+    string: String @unique
+    id: ID @id
+    anotherId: ID @index
+    testRelation: [UniqueStringNode] @relation(name: "TEST_RELATION", direction: OUT)
+  }
+
+  # Priority applied for @unique uniqueString field as primary
+  # key, independent of ordering of non-unique fields
+  type UniqueStringNode {
+    id: ID!
+  }
+
+  extend type UniqueStringNode {
+    uniqueString: String @unique
+    testRelation: [UniqueNode] @relation(name: "TEST_RELATION", direction: IN)
   }
 
   type SubscriptionC {

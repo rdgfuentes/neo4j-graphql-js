@@ -18,7 +18,7 @@ import {
   getOuterSkipLimit,
   getQueryCypherDirective,
   getMutationArguments,
-  possiblySetFirstId,
+  setPrimaryKeyValue,
   buildCypherParameters,
   getQueryArguments,
   initializeMutationParams,
@@ -46,13 +46,13 @@ import {
   getPayloadSelections,
   isGraphqlObjectType
 } from './utils';
+import { getPrimaryKey } from './augment/types/node/selection';
 import {
   getNamedType,
   isScalarType,
   isEnumType,
   isObjectType,
-  isInterfaceType,
-  Kind
+  isInterfaceType
 } from 'graphql';
 import {
   buildCypherSelection,
@@ -63,10 +63,7 @@ import {
 } from './selections';
 import _ from 'lodash';
 import neo4j from 'neo4j-driver';
-import {
-  isUnionTypeDefinition,
-  isUnionTypeExtensionDefinition
-} from './augment/types/types';
+import { isUnionTypeDefinition } from './augment/types/types';
 import {
   getFederatedOperationData,
   setCompoundKeyFilter,
@@ -178,6 +175,7 @@ export const relationFieldOnNodeType = ({
   initial,
   fieldName,
   fieldType,
+  fieldSelectionSet,
   variableName,
   relDirection,
   relType,
@@ -194,7 +192,7 @@ export const relationFieldOnNodeType = ({
   filterParams,
   selectionFilters,
   neo4jTypeArgs,
-  selections,
+  fieldsForTranslation,
   schemaType,
   subSelection,
   skipLimit,
@@ -265,17 +263,29 @@ export const relationFieldOnNodeType = ({
     ...arrayPredicates,
     ...filterPredicates
   ].filter(predicate => !!predicate);
+
   const orderByParam = filterParams['orderBy'];
-  const temporalOrdering = temporalOrderingFieldExists(
+
+  const usesTemporalOrdering = temporalOrderingFieldExists(
     schemaType,
     filterParams
   );
+  const selectedFieldNames = fieldSelectionSet.reduce((fieldNames, field) => {
+    if (field.name) fieldNames.push(field.name.value);
+    return fieldNames;
+  }, []);
+  const neo4jTypeFieldSelections = buildOrderedNeo4jTypeSelections({
+    schemaType: innerSchemaType,
+    selections: fieldsForTranslation,
+    usesTemporalOrdering,
+    selectedFieldNames
+  });
 
   tailParams.initial = `${initial}${fieldName}: ${
     !isArrayType(fieldType) ? 'head(' : ''
   }${
     orderByParam
-      ? temporalOrdering
+      ? usesTemporalOrdering
         ? `[sortedElement IN apoc.coll.sortMulti(`
         : `apoc.coll.sortMulti(`
       : ''
@@ -298,11 +308,10 @@ export const relationFieldOnNodeType = ({
   } | ${mapProjection}]${
     orderByParam
       ? `, [${buildSortMultiArgs(orderByParam)}])${
-          temporalOrdering
-            ? ` | sortedElement { .*,  ${neo4jTypeOrderingClauses(
-                selections,
-                innerSchemaType
-              )}}]`
+          usesTemporalOrdering
+            ? ` | sortedElement { .* ${
+                neo4jTypeFieldSelections ? `,  ${neo4jTypeFieldSelections}` : ''
+              }}]`
             : ``
         }`
       : ''
@@ -314,12 +323,14 @@ export const relationTypeFieldOnNodeType = ({
   innerSchemaTypeRelation,
   initial,
   fieldName,
+  fieldSelectionSet,
   subSelection,
   skipLimit,
   commaIfTail,
   tailParams,
   fieldType,
   variableName,
+  fieldsForTranslation,
   schemaType,
   innerSchemaType,
   nestedVariable,
@@ -332,66 +343,112 @@ export const relationTypeFieldOnNodeType = ({
   fieldArgs,
   cypherParams
 }) => {
+  let translation = '';
   if (innerSchemaTypeRelation.from === innerSchemaTypeRelation.to) {
-    tailParams.initial = `${initial}${fieldName}: {${subSelection[0]}}${skipLimit} ${commaIfTail}`;
-    return [tailParams, subSelection];
-  }
-  const relationshipVariableName = `${nestedVariable}_relation`;
-  const neo4jTypeClauses = neo4jTypePredicateClauses(
-    filterParams,
-    relationshipVariableName,
-    neo4jTypeArgs
-  );
-  const [filterPredicates, serializedFilterParam] = processFilterArgument({
-    fieldArgs,
-    schemaType: innerSchemaType,
-    variableName: relationshipVariableName,
-    resolveInfo,
-    params: selectionFilters,
-    paramIndex,
-    rootIsRelationType: true
-  });
-  const filterParamKey = `${tailParams.paramIndex}_filter`;
-  const fieldArgumentParams = subSelection[1];
-  const filterParam = fieldArgumentParams[filterParamKey];
-  if (
-    filterParam &&
-    typeof serializedFilterParam[filterParamKey] !== 'undefined'
-  ) {
-    subSelection[1][filterParamKey] = serializedFilterParam[filterParamKey];
-  }
+    translation = `${initial}${fieldName}: {${subSelection[0]}}${skipLimit} ${commaIfTail}`;
+  } else {
+    const relationshipVariableName = `${nestedVariable}_relation`;
 
-  const whereClauses = [...neo4jTypeClauses, ...filterPredicates];
+    const neo4jTypeClauses = neo4jTypePredicateClauses(
+      filterParams,
+      relationshipVariableName,
+      neo4jTypeArgs
+    );
+    const [filterPredicates, serializedFilterParam] = processFilterArgument({
+      fieldArgs,
+      parentSchemaType: schemaType,
+      schemaType: innerSchemaType,
+      variableName: relationshipVariableName,
+      resolveInfo,
+      params: selectionFilters,
+      paramIndex,
+      rootIsRelationType: true
+    });
+    const filterParamKey = `${tailParams.paramIndex}_filter`;
+    const fieldArgumentParams = subSelection[1];
+    const filterParam = fieldArgumentParams[filterParamKey];
+    if (
+      filterParam &&
+      typeof serializedFilterParam[filterParamKey] !== 'undefined'
+    ) {
+      subSelection[1][filterParamKey] = serializedFilterParam[filterParamKey];
+    }
+    const whereClauses = [...neo4jTypeClauses, ...filterPredicates];
 
-  tailParams.initial = `${initial}${fieldName}: ${
-    !isArrayType(fieldType) ? 'head(' : ''
-  }[(${safeVar(variableName)})${
-    schemaType.name === innerSchemaTypeRelation.to ? '<' : ''
-  }-[${safeVar(relationshipVariableName)}:${safeLabel(
-    innerSchemaTypeRelation.name
-  )}${queryParams}]-${
-    schemaType.name === innerSchemaTypeRelation.from ? '>' : ''
-  }(:${safeLabel(
-    schemaType.name === innerSchemaTypeRelation.from
-      ? [
-          innerSchemaTypeRelation.to,
-          ...getAdditionalLabels(
-            resolveInfo.schema.getType(innerSchemaTypeRelation.to),
-            cypherParams
-          )
-        ]
-      : [
-          innerSchemaTypeRelation.from,
-          ...getAdditionalLabels(
-            resolveInfo.schema.getType(innerSchemaTypeRelation.from),
-            cypherParams
-          )
-        ]
-  )}) ${
-    whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')} ` : ''
-  }| ${relationshipVariableName} {${subSelection[0]}}]${
-    !isArrayType(fieldType) ? ')' : ''
-  }${skipLimit} ${commaIfTail}`;
+    const orderByParam = filterParams['orderBy'];
+    const usesTemporalOrdering = temporalOrderingFieldExists(
+      innerSchemaType,
+      filterParams
+    );
+    const selectedFieldNames = fieldSelectionSet.reduce((fieldNames, field) => {
+      if (field.name) fieldNames.push(field.name.value);
+      return fieldNames;
+    }, []);
+    const neo4jTypeFieldSelections = buildOrderedNeo4jTypeSelections({
+      schemaType: innerSchemaType,
+      selections: fieldsForTranslation,
+      usesTemporalOrdering,
+      selectedFieldNames
+    });
+
+    const lhsOrdering = `${
+      orderByParam
+        ? usesTemporalOrdering
+          ? `[sortedElement IN apoc.coll.sortMulti(`
+          : `apoc.coll.sortMulti(`
+        : ''
+    }`;
+
+    const rhsOrdering = `${
+      orderByParam
+        ? `, [${buildSortMultiArgs(orderByParam)}])${
+            usesTemporalOrdering
+              ? ` | sortedElement { .* ${
+                  neo4jTypeFieldSelections
+                    ? `,  ${neo4jTypeFieldSelections}`
+                    : ''
+                }}]`
+              : ``
+          }`
+        : ''
+    }`;
+
+    const incomingNodeTypeName = innerSchemaTypeRelation.from;
+    const outgoingNodeTypeName = innerSchemaTypeRelation.to;
+    const innerSchemaTypeFields = innerSchemaType.getFields();
+    const selectsIncomingField = innerSchemaTypeFields[incomingNodeTypeName];
+    const selectsOutgoingField = innerSchemaTypeFields[outgoingNodeTypeName];
+
+    translation = `${initial}${fieldName}: ${
+      !isArrayType(fieldType) ? 'head(' : ''
+    }${lhsOrdering}[(${safeVar(variableName)})${
+      // if its fromField -- is this logically equivalent?
+      selectsIncomingField ? '<' : ''
+    }-[${safeVar(relationshipVariableName)}:${safeLabel(
+      innerSchemaTypeRelation.name
+    )}${queryParams}]-${selectsOutgoingField ? '>' : ''}(:${safeLabel(
+      selectsOutgoingField
+        ? [
+            outgoingNodeTypeName,
+            ...getAdditionalLabels(
+              resolveInfo.schema.getType(outgoingNodeTypeName),
+              cypherParams
+            )
+          ]
+        : [
+            incomingNodeTypeName,
+            ...getAdditionalLabels(
+              resolveInfo.schema.getType(incomingNodeTypeName),
+              cypherParams
+            )
+          ]
+    )}) ${
+      whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')} ` : ''
+    }| ${relationshipVariableName} {${subSelection[0]}}]${rhsOrdering}${
+      !isArrayType(fieldType) ? ')' : ''
+    }${skipLimit} ${commaIfTail}`;
+  }
+  tailParams.initial = translation;
   return [tailParams, subSelection];
 };
 
@@ -410,6 +467,8 @@ export const nodeTypeFieldOnRelationType = ({
   neo4jTypeArgs,
   schemaTypeRelation,
   innerSchemaType,
+  fieldSelectionSet,
+  fieldsForTranslation,
   schemaTypeFields,
   derivedTypeMap,
   isObjectTypeField,
@@ -423,7 +482,6 @@ export const nodeTypeFieldOnRelationType = ({
   fieldArgs,
   cypherParams
 }) => {
-  const safeVariableName = safeVar(variableName);
   if (
     isRootSelection({
       selectionInfo: parentSelectionInfo,
@@ -431,14 +489,18 @@ export const nodeTypeFieldOnRelationType = ({
     }) &&
     isRelationTypeDirectedField(fieldName)
   ) {
+    const nodeFieldVariableName = decideRootRelationshipTypeNodeVariable({
+      parentSelectionInfo,
+      fieldName
+    });
     const [mapProjection, labelPredicate] = buildMapProjection({
       schemaType: innerSchemaType,
       isObjectType: isObjectTypeField,
       isInterfaceType: isInterfaceTypeField,
       isUnionType: isUnionTypeField,
-      usesFragments,
-      safeVariableName,
+      safeVariableName: nodeFieldVariableName,
       subQuery: subSelection[0],
+      usesFragments,
       schemaTypeFields,
       derivedTypeMap,
       resolveInfo
@@ -468,15 +530,35 @@ export const nodeTypeFieldOnRelationType = ({
     tailParams,
     schemaTypeRelation,
     innerSchemaType,
+    fieldSelectionSet,
+    fieldsForTranslation,
+    usesFragments,
+    isObjectTypeField,
     isInterfaceTypeField,
+    isUnionTypeField,
     filterParams,
     neo4jTypeArgs,
     paramIndex,
     resolveInfo,
     selectionFilters,
+    schemaTypeFields,
+    derivedTypeMap,
     fieldArgs,
     cypherParams
   });
+};
+
+const decideRootRelationshipTypeNodeVariable = ({
+  parentSelectionInfo = {},
+  fieldName
+}) => {
+  const fromVariable = parentSelectionInfo.from;
+  const toVariable = parentSelectionInfo.to;
+  // assume incoming
+  let variableName = safeVar(fromVariable);
+  // else set as outgoing
+  if (fieldName === 'to') variableName = safeVar(toVariable);
+  return variableName;
 };
 
 const relationTypeMutationPayloadField = ({
@@ -496,7 +578,6 @@ const relationTypeMutationPayloadField = ({
   };
 };
 
-// TODO refactor
 const directedNodeTypeFieldOnRelationType = ({
   initial,
   fieldName,
@@ -510,12 +591,19 @@ const directedNodeTypeFieldOnRelationType = ({
   tailParams,
   schemaTypeRelation,
   innerSchemaType,
+  fieldSelectionSet,
+  fieldsForTranslation,
+  usesFragments,
+  isObjectTypeField,
   isInterfaceTypeField,
+  isUnionTypeField,
   filterParams,
   neo4jTypeArgs,
   paramIndex,
   resolveInfo,
   selectionFilters,
+  schemaTypeFields,
+  derivedTypeMap,
   fieldArgs,
   cypherParams
 }) => {
@@ -524,6 +612,19 @@ const directedNodeTypeFieldOnRelationType = ({
   const toTypeName = schemaTypeRelation.to;
   const isFromField = fieldName === fromTypeName || fieldName === 'from';
   const isToField = fieldName === toTypeName || fieldName === 'to';
+  const safeVariableName = nestedVariable;
+  const [mapProjection, labelPredicate] = buildMapProjection({
+    schemaType: innerSchemaType,
+    isObjectType: isObjectTypeField,
+    isInterfaceType: isInterfaceTypeField,
+    isUnionType: isUnionTypeField,
+    usesFragments,
+    safeVariableName,
+    subQuery: subSelection[0],
+    schemaTypeFields,
+    derivedTypeMap,
+    resolveInfo
+  });
   // Since the translations are significantly different,
   // we first check whether the relationship is reflexive
   if (fromTypeName === toTypeName) {
@@ -531,6 +632,47 @@ const directedNodeTypeFieldOnRelationType = ({
       isFromField ? 'from' : 'to'
     }_relation`;
     if (isRelationTypeDirectedField(fieldName)) {
+      const orderByParam = filterParams['orderBy'];
+      const usesTemporalOrdering = temporalOrderingFieldExists(
+        innerSchemaType,
+        filterParams
+      );
+      const selectedFieldNames = fieldSelectionSet.reduce(
+        (fieldNames, field) => {
+          if (field.name) fieldNames.push(field.name.value);
+          return fieldNames;
+        },
+        []
+      );
+      const neo4jTypeFieldSelections = buildOrderedNeo4jTypeSelections({
+        schemaType: innerSchemaType,
+        selections: fieldsForTranslation,
+        usesTemporalOrdering,
+        selectedFieldNames
+      });
+
+      const lhsOrdering = `${
+        orderByParam
+          ? usesTemporalOrdering
+            ? `[sortedElement IN apoc.coll.sortMulti(`
+            : `apoc.coll.sortMulti(`
+          : ''
+      }`;
+
+      const rhsOrdering = `${
+        orderByParam
+          ? `, [${buildSortMultiArgs(orderByParam)}])${
+              usesTemporalOrdering
+                ? ` | sortedElement { .* ${
+                    neo4jTypeFieldSelections
+                      ? `,  ${neo4jTypeFieldSelections}`
+                      : ''
+                  }}]`
+                : ``
+            }`
+          : ''
+      }`;
+
       const temporalFieldRelationshipVariableName = `${nestedVariable}_relation`;
       const neo4jTypeClauses = neo4jTypePredicateClauses(
         filterParams,
@@ -549,6 +691,7 @@ const directedNodeTypeFieldOnRelationType = ({
       const filterParamKey = `${tailParams.paramIndex}_filter`;
       const fieldArgumentParams = subSelection[1];
       const filterParam = fieldArgumentParams[filterParamKey];
+
       if (
         filterParam &&
         typeof serializedFilterParam[filterParamKey] !== 'undefined'
@@ -556,41 +699,36 @@ const directedNodeTypeFieldOnRelationType = ({
         subSelection[1][filterParamKey] = serializedFilterParam[filterParamKey];
       }
       const whereClauses = [...neo4jTypeClauses, ...filterPredicates];
+
       tailParams.initial = `${initial}${fieldName}: ${
         !isArrayType(fieldType) ? 'head(' : ''
-      }[(${safeVar(variableName)})${isFromField ? '<' : ''}-[${safeVar(
-        relationshipVariableName
-      )}:${safeLabel(relType)}${queryParams}]-${isToField ? '>' : ''}(${safeVar(
+      }${lhsOrdering}[(${safeVar(variableName)})${
+        isFromField ? '<' : ''
+      }-[${safeVar(relationshipVariableName)}:${safeLabel(
+        relType
+      )}${queryParams}]-${isToField ? '>' : ''}(${safeVar(
         nestedVariable
-      )}${
-        !isInterfaceTypeField
-          ? `:${safeLabel([
-              fromTypeName,
-              ...getAdditionalLabels(
-                resolveInfo.schema.getType(fromTypeName),
-                cypherParams
-              )
-            ])}`
-          : ''
-      }) ${
+      )}:${safeLabel([
+        fromTypeName,
+        ...getAdditionalLabels(
+          resolveInfo.schema.getType(fromTypeName),
+          cypherParams
+        )
+      ])}) ${
         whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')} ` : ''
-      }| ${relationshipVariableName} {${
-        // TODO switch to using buildMapProjection to support fragments
-        isInterfaceTypeField
-          ? `${fragmentType(nestedVariable, innerSchemaType.name)}${
-              subSelection[0] ? `, ${subSelection[0]}` : ''
-            }`
-          : subSelection[0]
-      }}]${!isArrayType(fieldType) ? ')' : ''}${skipLimit} ${commaIfTail}`;
+      }| ${relationshipVariableName} {${subSelection[0]}}]${rhsOrdering}${
+        !isArrayType(fieldType) ? ')' : ''
+      }${skipLimit} ${commaIfTail}`;
       return [tailParams, subSelection];
     } else {
-      tailParams.initial = `${initial}${fieldName}: ${variableName} {${subSelection[0]}}${skipLimit} ${commaIfTail}`;
       // Case of a renamed directed field
       // e.g., 'from: Movie' -> 'Movie: Movie'
+      tailParams.initial = `${initial}${fieldName}: ${mapProjection}${skipLimit} ${commaIfTail}`;
       return [tailParams, subSelection];
     }
   } else {
-    variableName = variableName + '_relation';
+    let whereClauses = [labelPredicate].filter(predicate => !!predicate);
+    const safeRelationshipVar = safeVar(`${variableName}_relation`);
     tailParams.initial = `${initial}${fieldName}: ${
       !isArrayType(fieldType) ? 'head(' : ''
     }[(:${safeLabel(
@@ -609,26 +747,23 @@ const directedNodeTypeFieldOnRelationType = ({
               cypherParams
             )
           ]
-    )})${isFromField ? '<' : ''}-[${safeVar(variableName)}]-${
-      isToField ? '>' : ''
-    }(${safeVar(nestedVariable)}:${
-      !isInterfaceTypeField
-        ? safeLabel([
-            innerSchemaType.name,
-            ...getAdditionalLabels(
-              resolveInfo.schema.getType(innerSchemaType.name),
-              cypherParams
-            )
-          ])
-        : ''
-    }${queryParams}) | ${nestedVariable} {${
-      // TODO switch to using buildMapProjection to support fragments
-      isInterfaceTypeField
-        ? `${fragmentType(nestedVariable, innerSchemaType.name)}${
-            subSelection[0] ? `, ${subSelection[0]}` : ''
+    )})${
+      isUnionTypeField
+        ? `--`
+        : `${isFromField ? '<' : ''}-[${safeRelationshipVar}]-${
+            isToField ? '>' : ''
           }`
-        : subSelection[0]
-    }}]${!isArrayType(fieldType) ? ')' : ''}${skipLimit} ${commaIfTail}`;
+    }(${safeVar(nestedVariable)}:${safeLabel([
+      innerSchemaType.name,
+      ...getAdditionalLabels(
+        resolveInfo.schema.getType(innerSchemaType.name),
+        cypherParams
+      )
+    ])}${queryParams})${
+      whereClauses.length > 0 ? ` WHERE ${whereClauses.join(' AND ')}` : ''
+    } | ${mapProjection}]${
+      !isArrayType(fieldType) ? ')' : ''
+    }${skipLimit} ${commaIfTail}`;
     return [tailParams, subSelection];
   }
 };
@@ -710,9 +845,16 @@ export const neo4jType = ({
   const parentVariableName = parentSelectionInfo.variableName;
   const parentFilterParams = parentSelectionInfo.filterParams;
   const parentSchemaType = parentSelectionInfo.schemaType;
-  const safeVariableName = safeVar(variableName);
   const relationshipVariableSuffix = `relation`;
   let fieldIsArray = isArrayType(fieldType);
+  const isOrderedForNodeType = temporalOrderingFieldExists(
+    parentSchemaType,
+    parentFilterParams
+  );
+  const isOrderedForRelationshipType = temporalOrderingFieldExists(
+    schemaType,
+    parentFilterParams
+  );
   if (!isNodeType(schemaType.astNode)) {
     if (
       isRelationTypePayload(schemaType) &&
@@ -732,15 +874,22 @@ export const neo4jType = ({
           variableName = `${variableName}_${relationshipVariableSuffix}`;
         }
       } else {
-        variableName = `${nestedVariable}_${relationshipVariableSuffix}`;
+        if (isOrderedForRelationshipType) {
+          variableName = `${variableName}_${relationshipVariableSuffix}`;
+        } else {
+          variableName = `${nestedVariable}_${relationshipVariableSuffix}`;
+        }
       }
     }
   }
+  const safeVariableName = safeVar(variableName);
+  const usesTemporalOrdering =
+    isOrderedForNodeType || isOrderedForRelationshipType;
   return {
     initial: `${initial}${fieldName}: ${
       fieldIsArray
         ? `reduce(a = [], INSTANCE IN ${variableName}.${fieldName} | a + {${subSelection[0]}})${commaIfTail}`
-        : temporalOrderingFieldExists(parentSchemaType, parentFilterParams)
+        : usesTemporalOrdering
         ? `${safeVariableName}.${fieldName}${commaIfTail}`
         : `{${subSelection[0]}}${commaIfTail}`
     }`,
@@ -759,7 +908,6 @@ export const translateQuery = ({
   otherParams
 }) => {
   const { typeName, variableName } = typeIdentifiers(resolveInfo.returnType);
-
   const schemaType = resolveInfo.schema.getType(typeName);
   const typeMap = resolveInfo.schema.getTypeMap();
   const selections = getPayloadSelections(resolveInfo);
@@ -828,20 +976,23 @@ export const translateQuery = ({
   const orderByValue = computeOrderBy(resolveInfo, schemaType);
 
   let usesFragments = isFragmentedSelection({ selections });
-  const isFragmentedInterfaceType = isInterfaceType && usesFragments;
-  const isFragmentedObjectType = isObjectType && usesFragments;
+  const isFragmentedInterfaceType = usesFragments && isInterfaceType;
+  const isFragmentedObjectType = usesFragments && isObjectType;
   const [schemaTypeFields, derivedTypeMap] = mergeSelectionFragments({
     schemaType,
     selections,
     isFragmentedObjectType,
+    isFragmentedInterfaceType,
     isUnionType,
     typeMap,
     resolveInfo
   });
+
   const hasOnlySchemaTypeFragments =
     schemaTypeFields.length > 0 && Object.keys(derivedTypeMap).length === 0;
-  // TODO refactor
-  if (hasOnlySchemaTypeFragments) usesFragments = false;
+  if (hasOnlySchemaTypeFragments) {
+    usesFragments = false;
+  }
   if (queryTypeCypherDirective) {
     return customQuery({
       resolveInfo,
@@ -922,7 +1073,7 @@ const buildTypeCompositionPredicate = ({
   resolveInfo
 }) => {
   const schemaTypeName = schemaType.name;
-  const isFragmentedInterfaceType = isInterfaceType && usesFragments;
+  const isFragmentedInterfaceType = usesFragments && isInterfaceType;
   let labelPredicate = '';
   if (isFragmentedInterfaceType || isUnionType) {
     let derivedTypes = [];
@@ -948,7 +1099,6 @@ const buildTypeCompositionPredicate = ({
       // Otherwise, use only those types provided in fragments
       derivedTypes = Object.keys(derivedTypeMap);
     }
-    // TODO refactor above branch now that more specific branching was needed
     const typeSelectionPredicates = derivedTypes.map(selectedType => {
       return `"${selectedType}" IN labels(${safeVariableName})`;
     });
@@ -1016,7 +1166,6 @@ const customQuery = ({
   const isNeo4jTypeOutput = isNeo4jType(schemaType.name);
   const { cypherPart: orderByClause } = orderByValue;
   // Don't add subQuery for scalar type payloads
-  // FIXME: fix subselection translation for temporal type payload
   const isScalarPayload = isNeo4jTypeOutput || isScalarType;
   const fragmentTypeParams = derivedTypesParams({
     isInterfaceType,
@@ -1284,7 +1433,8 @@ export const translateMutation = ({
   const isUnionType = isGraphqlUnionType(schemaType);
 
   const usesFragments = isFragmentedSelection({ selections });
-  const isFragmentedObjectType = isObjectType && usesFragments;
+  const isFragmentedObjectType = usesFragments && isObjectType;
+  const isFragmentedInterfaceType = usesFragments && isInterfaceType;
 
   const interfaceLabels =
     typeof schemaType.getInterfaces === 'function'
@@ -1302,6 +1452,7 @@ export const translateMutation = ({
     schemaType,
     selections,
     isFragmentedObjectType,
+    isFragmentedInterfaceType,
     isUnionType,
     typeMap,
     resolveInfo
@@ -1453,7 +1604,6 @@ const customMutation = ({
     resolveInfo
   });
   let query = '';
-  // TODO refactor
   if (labelPredicate) {
     query = `CALL apoc.cypher.doIt("${
       cypherQueryArg.value.value
@@ -1508,10 +1658,14 @@ const nodeCreate = ({
   const safeLabelName = safeLabel([typeName, ...additionalLabels]);
   let statements = [];
   const args = getMutationArguments(resolveInfo);
-  statements = possiblySetFirstId({
+  const fieldMap = schemaType.getFields();
+  const fields = Object.values(fieldMap).map(field => field.astNode);
+  const primaryKey = getPrimaryKey({ fields });
+  statements = setPrimaryKeyValue({
     args,
     statements,
-    params: params.params
+    params: params.params,
+    primaryKey
   });
   const [preparedParams, paramStatements] = buildCypherParameters({
     args,
@@ -1547,8 +1701,10 @@ const nodeDelete = ({
   const safeVariableName = safeVar(variableName);
   const safeLabelName = safeLabel(typeName);
   const args = getMutationArguments(resolveInfo);
-  const primaryKeyArg = args[0];
-  const primaryKeyArgName = primaryKeyArg.name.value;
+  const fieldMap = schemaType.getFields();
+  const fields = Object.values(fieldMap).map(field => field.astNode);
+  const primaryKey = getPrimaryKey({ fields });
+  const primaryKeyArgName = primaryKey.name.value;
   const neo4jTypeArgs = getNeo4jTypeArguments(args);
   const [primaryKeyParam] = splitSelectionParameters(params, primaryKeyArgName);
   const neo4jTypeClauses = neo4jTypePredicateClauses(
@@ -1689,7 +1845,6 @@ const relationshipCreate = ({
       to: toVar,
       variableName: lowercased
     },
-    variableName: schemaType.name === fromType ? `${toVar}` : `${fromVar}`,
     cypherParams: getCypherParams(context)
   });
   params = { ...preparedParams, ...subParams };
@@ -1815,7 +1970,6 @@ const relationshipDelete = ({
       from: `_${fromVar}`,
       to: `_${toVar}`
     },
-    variableName: schemaType.name === fromType ? `_${toVar}` : `_${fromVar}`,
     cypherParams: getCypherParams(context)
   });
   params = { ...params, ...subParams };
@@ -1941,7 +2095,6 @@ const relationshipMergeOrUpdate = ({
         to: toVar,
         variableName: lowercased
       },
-      variableName: schemaType.name === fromType ? `${toVar}` : `${fromVar}`,
       cypherParams: getCypherParams(context)
     });
     let cypherOperation = '';
@@ -1988,8 +2141,10 @@ const nodeMergeOrUpdate = ({
 }) => {
   const safeVariableName = safeVar(variableName);
   const args = getMutationArguments(resolveInfo);
-  const primaryKeyArg = args[0];
-  const primaryKeyArgName = primaryKeyArg.name.value;
+  const fieldMap = schemaType.getFields();
+  const fields = Object.values(fieldMap).map(field => field.astNode);
+  const primaryKey = getPrimaryKey({ fields });
+  const primaryKeyArgName = primaryKey.name.value;
   const neo4jTypeArgs = getNeo4jTypeArguments(args);
   const [primaryKeyParam, updateParams] = splitSelectionParameters(
     params,
@@ -2035,52 +2190,62 @@ const nodeMergeOrUpdate = ({
     schemaType,
     resolveInfo
   });
+  if (!preparedParams.params) preparedParams.params = {};
   preparedParams.params[primaryKeyArgName] = primaryKeyParam[primaryKeyArgName];
   params = { ...preparedParams, ...subParams };
   query += `RETURN ${safeVariableName} {${subQuery}} AS ${safeVariableName}`;
   return [query, params];
 };
 
-const neo4jTypeOrderingClauses = (selections, innerSchemaType) => {
-  const selectedTypes =
-    selections && selections[0] && selections[0].selectionSet
-      ? selections[0].selectionSet.selections
-      : [];
-  return selectedTypes
-    .reduce((temporalTypeFields, innerSelection) => {
-      // name of temporal type field
-      const fieldName = innerSelection.name.value;
-      const fieldTypeName = getFieldTypeName(innerSchemaType, fieldName);
-      if (isTemporalType(fieldTypeName)) {
-        const innerSelectedTypes = innerSelection.selectionSet
-          ? innerSelection.selectionSet.selections
-          : [];
-        temporalTypeFields.push(
-          `${fieldName}: {${innerSelectedTypes
-            .reduce((temporalSubFields, t) => {
-              // temporal type subfields, year, minute, etc.
-              const subFieldName = t.name.value;
-              if (subFieldName === 'formatted') {
-                temporalSubFields.push(
-                  `${subFieldName}: toString(sortedElement.${fieldName})`
-                );
-              } else {
-                temporalSubFields.push(
-                  `${subFieldName}: sortedElement.${fieldName}.${subFieldName}`
-                );
-              }
-              return temporalSubFields;
-            }, [])
-            .join(',')}}`
+const buildOrderedNeo4jTypeSelections = ({
+  schemaType,
+  selections,
+  usesTemporalOrdering,
+  selectedFieldNames
+}) => {
+  let neo4jTypeSelections = '';
+  if (usesTemporalOrdering) {
+    neo4jTypeSelections = selections
+      .reduce((temporalTypeFields, innerSelection) => {
+        // name of temporal type field
+        const fieldName = innerSelection.name.value;
+        const fieldTypeName = getFieldTypeName(schemaType, fieldName);
+        const fieldIsSelected = selectedFieldNames.some(
+          name => name === fieldName
         );
-      }
-      return temporalTypeFields;
-    }, [])
-    .join(',');
+        const isTemporalTypeField = isTemporalType(fieldTypeName);
+        if (isTemporalTypeField && fieldIsSelected) {
+          const innerSelectedTypes = innerSelection.selectionSet
+            ? innerSelection.selectionSet.selections
+            : [];
+
+          temporalTypeFields.push(
+            `${fieldName}: {${innerSelectedTypes
+              .reduce((temporalSubFields, t) => {
+                // temporal type subfields, year, minute, etc.
+                const subFieldName = t.name.value;
+                if (subFieldName === 'formatted') {
+                  temporalSubFields.push(
+                    `${subFieldName}: toString(sortedElement.${fieldName})`
+                  );
+                } else {
+                  temporalSubFields.push(
+                    `${subFieldName}: sortedElement.${fieldName}.${subFieldName}`
+                  );
+                }
+                return temporalSubFields;
+              }, [])
+              .join(',')}}`
+          );
+        }
+        return temporalTypeFields;
+      }, [])
+      .join(',');
+  }
+  return neo4jTypeSelections;
 };
 
 const getFieldTypeName = (schemaType, fieldName) => {
-  // TODO handle for fragments?
   const field =
     schemaType && fieldName ? schemaType.getFields()[fieldName] : undefined;
   return field ? field.type.name : '';
@@ -2120,6 +2285,7 @@ const processFilterArgument = ({
   resolveInfo,
   params,
   paramIndex,
+  parentSchemaType,
   rootIsRelationType = false
 }) => {
   const filterArg = fieldArgs.find(e => e.name.value === 'filter');
@@ -2147,6 +2313,7 @@ const processFilterArgument = ({
       rootIsRelationType,
       variableName,
       schemaType,
+      parentSchemaType,
       schema
     });
     params = {
@@ -2166,6 +2333,7 @@ const analyzeFilterArguments = ({
 }) => {
   return Object.entries(filterValue).reduce(
     ([filterFieldMap, serializedParams], [name, value]) => {
+      const filterParamName = serializeFilterFieldName(name, value);
       const [serializedValue, fieldMap] = analyzeFilterArgument({
         filterValue: value,
         filterValues: filterValue,
@@ -2175,7 +2343,6 @@ const analyzeFilterArguments = ({
         schemaType,
         schema
       });
-      const filterParamName = serializeFilterFieldName(name, value);
       filterFieldMap[filterParamName] = fieldMap;
       serializedParams[filterParamName] = serializedValue;
       return [filterFieldMap, serializedParams];
@@ -2274,7 +2441,11 @@ const analyzeFilterArgument = ({
             filterOperationType
           })
         ) {
-          serializedFilterParam = serializeNeo4jTypeParam(filterValue);
+          [serializedFilterParam, filterMapValue] = analyzeNeo4jTypeFilter({
+            filterOperationType,
+            filterValue,
+            parentFieldName
+          });
         } else if (isRelation || isRelationType || isRelationTypeNode) {
           // recursion
           [serializedFilterParam, filterMapValue] = analyzeNestedFilterArgument(
@@ -2293,6 +2464,35 @@ const analyzeFilterArgument = ({
         }
       }
     }
+  }
+  return [serializedFilterParam, filterMapValue];
+};
+
+const analyzeNeo4jTypeFilter = ({
+  filterOperationType,
+  filterValue,
+  parentFieldName
+}) => {
+  const serializedFilterParam = serializeNeo4jTypeParam({
+    filterValue,
+    filterOperationType,
+    parentFieldName
+  });
+  let filterMapValue = {};
+  const isListFilterArgument =
+    filterOperationType === 'in' || filterOperationType === 'not_in';
+  if (isListFilterArgument) {
+    filterMapValue = filterValue.reduce((booleanMap, filter) => {
+      Object.keys(filter).forEach(key => {
+        booleanMap[key] = true;
+      });
+      return booleanMap;
+    }, {});
+  } else {
+    filterMapValue = Object.keys(filterValue).reduce((booleanMap, key) => {
+      booleanMap[key] = true;
+      return booleanMap;
+    }, {});
   }
   return [serializedFilterParam, filterMapValue];
 };
@@ -2357,13 +2557,24 @@ const serializeFilterFieldName = (name, value) => {
   return name;
 };
 
-const serializeNeo4jTypeParam = filterValue => {
+const serializeNeo4jTypeParam = ({
+  filterValue,
+  filterOperationType,
+  parentFieldName
+}) => {
   const isList = Array.isArray(filterValue);
   if (!isList) filterValue = [filterValue];
   let serializedValues = filterValue.reduce((serializedValues, filter) => {
     let serializedValue = {};
-    if (filter['formatted']) serializedValue = filter['formatted'];
-    else {
+    if (
+      filter['formatted'] &&
+      parentFieldName !== 'OR' &&
+      parentFieldName !== 'AND' &&
+      filterOperationType !== 'in' &&
+      filterOperationType !== 'not_in'
+    ) {
+      serializedValue = filter['formatted'];
+    } else {
       serializedValue = Object.entries(filter).reduce(
         (serialized, [key, value]) => {
           if (Number.isInteger(value)) value = neo4j.int(value);
@@ -2393,6 +2604,7 @@ const translateFilterArguments = ({
   variableName,
   rootIsRelationType,
   schemaType,
+  parentSchemaType,
   schema
 }) => {
   return Object.entries(filterFieldMap).reduce(
@@ -2406,6 +2618,7 @@ const translateFilterArguments = ({
         rootIsRelationType,
         variableName,
         schemaType,
+        parentSchemaType,
         schema
       });
       if (translation) {
@@ -2426,8 +2639,8 @@ const translateFilterArgument = ({
   rootIsRelationType,
   variableName,
   filterParam,
-  parentSchemaType,
   schemaType,
+  parentSchemaType,
   schema
 }) => {
   // parse field name into prefix (ex: name, company) and
@@ -2706,12 +2919,12 @@ const translateInputFilter = ({
   fieldName,
   filterParam,
   schema,
-  parentSchemaType,
   schemaType,
   parameterPath,
+  nullFieldPredicate,
+  parentSchemaType,
   parentParamPath,
-  parentFieldName,
-  nullFieldPredicate
+  parentFieldName
 }) => {
   if (fieldName === 'AND' || fieldName === 'OR') {
     return translateLogicalFilter({
@@ -2985,10 +3198,10 @@ const decideRelationFilterMetadata = ({
     relatedType = typeVariables.typeName;
   } else if (innerRelationTypeDirective) {
     isRelationType = true;
-    [thisType, relatedType, relDirection] = decideRelationTypeDirection(
-      schemaType,
-      innerRelationTypeDirective
-    );
+    thisType = innerRelationTypeDirective.from;
+    relatedType = innerRelationTypeDirective.to;
+    relLabel = innerRelationTypeDirective.name;
+    relDirection = 'OUT';
     if (thisType === relatedType) {
       isReflexiveRelationType = true;
       if (fieldName === 'from') {
@@ -2996,17 +3209,43 @@ const decideRelationFilterMetadata = ({
         relDirection = 'IN';
       } else if (fieldName === 'to') {
         isReflexiveTypeDirectedField = true;
-        relDirection = 'OUT';
+      }
+    } else if (thisType !== relatedType) {
+      const filteredType = schemaType && schemaType.name ? schemaType.name : '';
+      if (filteredType === relatedType) {
+        // then a filter argument for the incoming direction is being used
+        // when querying the node type it goes out from
+        const temp = thisType;
+        thisType = relatedType;
+        relatedType = temp;
+        relDirection = 'IN';
       }
     }
-    relLabel = innerRelationTypeDirective.name;
   } else if (relationTypeDirective) {
     isRelationTypeNode = true;
-    [thisType, relatedType, relDirection] = decideRelationTypeDirection(
-      parentSchemaType,
-      relationTypeDirective
-    );
+    thisType = relationTypeDirective.from;
+    relatedType = relationTypeDirective.to;
     relLabel = variableName;
+    relDirection = 'OUT';
+    // if not a reflexive relationship type
+    if (thisType !== relatedType) {
+      // When buildFilterPredicates is used in buildRelationPredicate,
+      // parentSchemaType is provided and used here to decide whether
+      // to filter the incoming or outgoing node type
+      const filteredType =
+        parentSchemaType && parentSchemaType.name ? parentSchemaType.name : '';
+      // the connecting node type field on a relationship type filter
+      // may be incoming or outgoing; thisType could be .from or .to
+      if (filteredType === relatedType) {
+        // then this filter argument is being used on a field of the node type
+        // the relationship goes .to, so we need to filter for the node types
+        // it comes .from
+        const temp = thisType;
+        thisType = relatedType;
+        relatedType = temp;
+        relDirection = 'IN';
+      }
+    }
   }
   return [
     thisType,
@@ -3021,24 +3260,8 @@ const decideRelationFilterMetadata = ({
   ];
 };
 
-const decideRelationTypeDirection = (schemaType, relationTypeDirective) => {
-  let fromType = relationTypeDirective.from;
-  let toType = relationTypeDirective.to;
-  let relDirection = 'OUT';
-  if (fromType !== toType) {
-    if (schemaType && schemaType.name === toType) {
-      const temp = fromType;
-      fromType = toType;
-      toType = temp;
-      relDirection = 'IN';
-    }
-  }
-  return [fromType, toType, relDirection];
-};
-
 const buildRelationPredicate = ({
   rootIsRelationType,
-  parentFieldName,
   isRelationType,
   isReflexiveRelationType,
   isReflexiveTypeDirectedField,
@@ -3192,7 +3415,6 @@ const buildRelatedTypeListComprehension = ({
   if (rootIsRelationType) {
     relationVariable = variableName;
   }
-
   const thisTypeVariable =
     !rootIsRelationType && !isRelationTypeNode
       ? safeVar(lowFirstLetter(variableName))
@@ -3268,6 +3490,51 @@ const buildFilterPredicates = ({
     .join(' AND ');
 };
 
+const decideNeo4jTypeFilter = ({ filterOperationType, typeName }) => {
+  let cypherTypeConstructor = '';
+  let isTemporalFilter = false;
+  let isSpatialFilter = false;
+  if (
+    !isSpatialDistanceInputType({
+      filterOperationType
+    })
+  ) {
+    switch (typeName) {
+      case '_Neo4jTime': {
+        isTemporalFilter = true;
+        cypherTypeConstructor = 'time';
+        break;
+      }
+      case '_Neo4jDate': {
+        isTemporalFilter = true;
+        cypherTypeConstructor = 'date';
+        break;
+      }
+      case '_Neo4jDateTime': {
+        isTemporalFilter = true;
+        cypherTypeConstructor = 'datetime';
+        break;
+      }
+      case '_Neo4jLocalTime': {
+        isTemporalFilter = true;
+        cypherTypeConstructor = 'localtime';
+        break;
+      }
+      case '_Neo4jLocalDateTime': {
+        isTemporalFilter = true;
+        cypherTypeConstructor = 'localdatetime';
+        break;
+      }
+      case '_Neo4jPoint': {
+        isSpatialFilter = true;
+        cypherTypeConstructor = 'point';
+        break;
+      }
+    }
+  }
+  return [isTemporalFilter, isSpatialFilter, cypherTypeConstructor];
+};
+
 const translateNeo4jTypeFilter = ({
   typeName,
   isRelationTypeNode,
@@ -3282,36 +3549,17 @@ const translateNeo4jTypeFilter = ({
   isListFilterArgument,
   nullFieldPredicate
 }) => {
-  let predicate = '';
-  let cypherTypeConstructor = '';
-  if (
-    !isSpatialDistanceInputType({
-      filterOperationType
-    })
-  ) {
-    switch (typeName) {
-      case '_Neo4jTime':
-        cypherTypeConstructor = 'time';
-        break;
-      case '_Neo4jDate':
-        cypherTypeConstructor = 'date';
-        break;
-      case '_Neo4jDateTime':
-        cypherTypeConstructor = 'datetime';
-        break;
-      case '_Neo4jLocalTime':
-        cypherTypeConstructor = 'localtime';
-        break;
-      case '_Neo4jLocalDateTime':
-        cypherTypeConstructor = 'localdatetime';
-        break;
-      case '_Neo4jPoint':
-        cypherTypeConstructor = 'point';
-        break;
-    }
-  }
   const safeVariableName = safeVar(variableName);
   let propertyPath = `${safeVariableName}.${filterOperationField}`;
+  let predicate = '';
+  const [
+    isTemporalFilter,
+    isSpatialFilter,
+    cypherTypeConstructor
+  ] = decideNeo4jTypeFilter({
+    filterOperationType,
+    typeName
+  });
   if (isExistentialFilter(filterOperationType, filterValue)) {
     return translateNullFilter({
       filterOperationField,
@@ -3328,28 +3576,93 @@ const translateNeo4jTypeFilter = ({
     filterOperationType
   });
   predicate = buildNeo4jTypePredicate({
-    typeName,
     fieldName,
     filterOperationField,
     filterOperationType,
+    filterValue,
     parameterPath,
     variableName,
     nullFieldPredicate,
     rootPredicateFunction,
-    cypherTypeConstructor
+    cypherTypeConstructor,
+    isTemporalFilter,
+    isSpatialFilter
   });
   return predicate;
+};
+
+const buildNeo4jTypeTranslation = ({
+  filterOperationType,
+  listVariable,
+  isTemporalFilter,
+  isSpatialFilter,
+  isListFilterArgument,
+  filterValue,
+  nullFieldPredicate,
+  propertyPath,
+  cypherTypeConstructor,
+  operatorExpression,
+  parameterPath,
+  rootPredicateFunction
+}) => {
+  if (
+    isSpatialDistanceInputType({
+      filterOperationType
+    })
+  ) {
+    listVariable = `${listVariable}.distance`;
+  }
+  let translation = '';
+  const isIdentityFilter =
+    !filterOperationType || filterOperationType === 'not';
+  if (
+    (isTemporalFilter || isSpatialFilter) &&
+    (isIdentityFilter || isListFilterArgument)
+  ) {
+    const generalizedComparisonPredicates = Object.keys(filterValue).map(
+      filterName => {
+        const isTemporalFormatted =
+          isTemporalFilter && filterName === 'formatted';
+        if (nullFieldPredicate || isListFilterArgument) {
+          nullFieldPredicate = `${listVariable}.${filterName} IS NULL OR `;
+        }
+        if (isTemporalFormatted) {
+          return `(${nullFieldPredicate}${propertyPath} = ${cypherTypeConstructor}(${listVariable}.${filterName}))`;
+        } else {
+          return `(${nullFieldPredicate}${propertyPath}.${filterName} = ${listVariable}.${filterName})`;
+        }
+      }
+    );
+    translation = `(${generalizedComparisonPredicates.join(' AND ')})`;
+    if (filterOperationType === 'not') {
+      translation = `NOT${translation}`;
+    }
+  } else {
+    translation = `(${nullFieldPredicate}${operatorExpression} ${cypherTypeConstructor}(${listVariable}))`;
+  }
+  if (isListFilterArgument) {
+    translation = buildPredicateFunction({
+      predicateListVariable: parameterPath,
+      listElementVariable: listVariable,
+      rootPredicateFunction,
+      predicates: translation
+    });
+  }
+  return translation;
 };
 
 const buildNeo4jTypePredicate = ({
   fieldName,
   filterOperationField,
   filterOperationType,
+  filterValue,
   parameterPath,
   variableName,
   nullFieldPredicate,
   rootPredicateFunction,
-  cypherTypeConstructor
+  cypherTypeConstructor,
+  isTemporalFilter,
+  isSpatialFilter
 }) => {
   const isListFilterArgument =
     filterOperationType === 'in' || filterOperationType === 'not_in';
@@ -3365,21 +3678,19 @@ const buildNeo4jTypePredicate = ({
     isListFilterArgument,
     parameterPath
   });
-  if (
-    isSpatialDistanceInputType({
-      filterOperationType
-    })
-  ) {
-    listVariable = `${listVariable}.distance`;
-  }
-  let translation = `(${nullFieldPredicate}${operatorExpression} ${cypherTypeConstructor}(${listVariable}))`;
-  if (isListFilterArgument) {
-    translation = buildPredicateFunction({
-      predicateListVariable: parameterPath,
-      listElementVariable: listVariable,
-      rootPredicateFunction,
-      predicates: translation
-    });
-  }
+  const translation = buildNeo4jTypeTranslation({
+    filterOperationType,
+    listVariable,
+    isTemporalFilter,
+    isSpatialFilter,
+    isListFilterArgument,
+    filterValue,
+    nullFieldPredicate,
+    propertyPath,
+    cypherTypeConstructor,
+    operatorExpression,
+    parameterPath,
+    rootPredicateFunction
+  });
   return translation;
 };

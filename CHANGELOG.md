@@ -1,5 +1,33 @@
 # Changelog
 
+## 2.16.0
+
+- [Add optional @id, @unique, and @index schema directives](https://github.com/neo4j-graphql/neo4j-graphql-js/pull/499)
+
+## 2.15.1
+
+- [Fix invalid input in generated query when using inline fragments inside fragment](https://github.com/neo4j-graphql/neo4j-graphql-js/pull/492)
+- [Fixed issue with fragment used on an interface implemented by that object](https://github.com/neo4j-graphql/neo4j-graphql-js/pull/492)
+- [Add \_id to relationship types](https://github.com/neo4j-graphql/neo4j-graphql-js/pull/492)
+- [Fix schema augmentation issue when schema contains array of properties on relationship](https://github.com/neo4j-graphql/neo4j-graphql-js/pull/492)
+- [Fixed issue that didn't generate merge mutations when types only had a single field](https://github.com/neo4j-graphql/neo4j-graphql-js/pull/492)
+
+## 2.15.0
+
+- [Fix for relationship mutation issue when only to field is requested](https://github.com/neo4j-graphql/neo4j-graphql-js/pull/485)
+- [Relationship API bug fixes and API updates](https://github.com/neo4j-graphql/neo4j-graphql-js/pull/481)
+
+## 2.14.4
+
+- [Fix for missing results with some queries using nested filtering](https://github.com/neo4j-graphql/neo4j-graphql-js/pull/469)
+- [Use \_RelationDirections enum for relationship directions in inferSchema](https://github.com/neo4j-graphql/neo4j-graphql-js/commit/c9b8b1af65ea751d060be79f8ab9d521577968de)
+
+## 2.14.3
+
+- [Add initial support for bookmarks](https://github.com/neo4j-graphql/neo4j-graphql-js/pull/460)
+- [Improvements to temporal and spatial identity filters](https://github.com/neo4j-graphql/neo4j-graphql-js/pull/466)
+- [Fix for issue with using relationship types with federated entities](https://github.com/neo4j-graphql/neo4j-graphql-js/pull/441)
+
 ## 2.14.2
 
 - [Fix for missing apollo-server dependency with apollo-server-lambda](https://github.com/neo4j-graphql/neo4j-graphql-js/pull/439)

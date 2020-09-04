@@ -251,15 +251,36 @@ export const propertyFieldExists = ({
 }) => {
   const fields = definition.fields || [];
   return fields.find(field => {
-    const fieldName = field.name.value;
     const fieldType = field.type;
     const unwrappedType = unwrapNamedType({ type: fieldType });
     const outputType = unwrappedType.name;
+    const typeWrappers = unwrappedType.wrappers;
     const outputDefinition = typeDefinitionMap[outputType];
     const outputKind = outputDefinition ? outputDefinition.kind : '';
-    return isPropertyTypeField({
-      kind: outputKind,
-      type: outputType
-    });
+    const isListType = typeWrappers[TypeWrappers.LIST_TYPE];
+    return (
+      !isListType &&
+      isPropertyTypeField({
+        kind: outputKind,
+        type: outputType
+      })
+    );
   });
+};
+
+export const getTypeFields = ({
+  typeName = '',
+  definition = {},
+  typeExtensionDefinitionMap = {}
+}) => {
+  const allFields = [];
+  const fields = definition.fields;
+  if (fields && fields.length) {
+    // if there are .fields, return them
+    allFields.push(...fields);
+    const extensions = typeExtensionDefinitionMap[typeName] || [];
+    // also return any .fields of extensions of this type
+    extensions.forEach(extension => allFields.push(...extension.fields));
+  }
+  return allFields;
 };

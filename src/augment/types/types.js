@@ -5,8 +5,7 @@ import {
   GraphQLString,
   GraphQLInt,
   GraphQLFloat,
-  GraphQLBoolean,
-  isTypeExtensionNode
+  GraphQLBoolean
 } from 'graphql';
 import {
   isIgnoredField,
@@ -37,7 +36,6 @@ import {
   getFieldDefinition,
   isTemporalField
 } from '../fields';
-
 import { augmentNodeType, augmentNodeTypeFields } from './node/node';
 import { RelationshipDirectionField } from '../types/relationship/relationship';
 
@@ -88,7 +86,6 @@ export const Neo4jDataType = {
     [TemporalType.LOCALDATETIME]: 'Temporal',
     [SpatialType.POINT]: 'Spatial'
   },
-  // TODO probably revise and remove...
   STRUCTURAL: {
     [Kind.OBJECT_TYPE_DEFINITION]: Neo4jStructuralType,
     [Kind.INTERFACE_TYPE_DEFINITION]: Neo4jStructuralType,
@@ -123,6 +120,12 @@ export const isObjectTypeDefinition = ({ definition = {} }) =>
   definition.kind === Kind.OBJECT_TYPE_DEFINITION;
 
 /**
+ * A predicate function for identifying a GraphQL Object Type Extension definition
+ */
+export const isObjectTypeExtensionDefinition = ({ definition = {} }) =>
+  definition.kind === Kind.OBJECT_TYPE_EXTENSION;
+
+/**
  * A predicate function for identifying a GraphQL Input Object Type definition
  */
 export const isInputObjectTypeDefinition = ({ definition = {} }) =>
@@ -133,6 +136,12 @@ export const isInputObjectTypeDefinition = ({ definition = {} }) =>
  */
 export const isInterfaceTypeDefinition = ({ definition = {} }) =>
   definition.kind === Kind.INTERFACE_TYPE_DEFINITION;
+
+/**
+ * A predicate function for identifying a GraphQL Object Type Extension definition
+ */
+export const isInterfaceTypeExtensionDefinition = ({ definition = {} }) =>
+  definition.kind === Kind.INTERFACE_TYPE_EXTENSION;
 
 /**
  * A predicate function for identifying a GraphQL Union definition
@@ -342,6 +351,7 @@ export const augmentTypes = ({
               typeName,
               definition,
               typeDefinitionMap,
+              typeExtensionDefinitionMap,
               generatedTypeMap,
               operationTypeMap,
               nodeInputTypeMap,
@@ -669,6 +679,7 @@ const augmentOperationType = ({
           typeName,
           definition: extension,
           typeDefinitionMap,
+          typeExtensionDefinitionMap,
           generatedTypeMap,
           operationTypeMap,
           nodeInputTypeMap,
@@ -676,9 +687,6 @@ const augmentOperationType = ({
           propertyInputValues,
           config
         });
-        // FIXME fieldArguments are modified through reference so
-        // this branch doesn't end up mattereing. A case of isIgnoredType
-        // being true may also be highly improbable, though it is posisble
         if (!isIgnoredType) {
           extension.fields = propertyOutputFields;
         }
@@ -695,6 +703,7 @@ const augmentOperationType = ({
       typeName,
       definition,
       typeDefinitionMap,
+      typeExtensionDefinitionMap,
       generatedTypeMap,
       propertyOutputFields,
       operationTypeMap,

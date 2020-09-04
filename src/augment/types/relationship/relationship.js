@@ -4,9 +4,11 @@ import {
   unwrapNamedType,
   isPropertyTypeField,
   getFieldType,
-  toSnakeCase
+  toSnakeCase,
+  buildNeo4jSystemIDField
 } from '../../fields';
 import {
+  OrderingArgument,
   FilteringArgument,
   augmentInputTypePropertyFields
 } from '../../input-values';
@@ -15,9 +17,13 @@ import {
   getDirective,
   isIgnoredField,
   isCypherField,
+  isPrimaryKeyField,
+  isUniqueField,
+  isIndexedField,
   getDirectiveArgument
 } from '../../directives';
 import { isOperationTypeDefinition } from '../../types/types';
+import { ApolloError } from 'apollo-server-errors';
 
 // An enum for the semantics of the directed fields of a relationship type
 export const RelationshipDirectionField = {
@@ -39,6 +45,7 @@ export const augmentRelationshipTypeField = ({
   outputDefinition,
   nodeInputTypeMap,
   typeDefinitionMap,
+  typeExtensionDefinitionMap,
   generatedTypeMap,
   operationTypeMap,
   outputType,
@@ -46,6 +53,21 @@ export const augmentRelationshipTypeField = ({
   outputTypeWrappers
 }) => {
   if (!isOperationTypeDefinition({ definition, operationTypeMap })) {
+    const isPrimaryKey = isPrimaryKeyField({ directives: fieldDirectives });
+    const isIndex = isIndexedField({ directives: fieldDirectives });
+    const isUnique = isUniqueField({ directives: fieldDirectives });
+    if (isPrimaryKey)
+      throw new ApolloError(
+        `The @id directive cannot be used on @relation type fields.`
+      );
+    if (isUnique)
+      throw new ApolloError(
+        `The @unique directive cannot be used on @relation type fields.`
+      );
+    if (isIndex)
+      throw new ApolloError(
+        `The @index directive cannot be used on @relation type fields.`
+      );
     if (!isCypherField({ directives: fieldDirectives })) {
       const relationshipTypeDirective = getDirective({
         directives: outputDefinition.directives,
@@ -81,12 +103,14 @@ export const augmentRelationshipTypeField = ({
         nodeInputTypeMap
       ] = augmentRelationshipQueryAPI({
         typeName,
+        definition,
         fieldArguments,
         fieldName,
         outputType,
         fromType,
         toType,
         typeDefinitionMap,
+        typeExtensionDefinitionMap,
         generatedTypeMap,
         nodeInputTypeMap,
         relationshipInputTypeMap,
@@ -110,6 +134,7 @@ export const augmentRelationshipTypeField = ({
         propertyInputValues,
         propertyOutputFields,
         typeDefinitionMap,
+        typeExtensionDefinitionMap,
         generatedTypeMap,
         operationTypeMap,
         config
@@ -148,17 +173,23 @@ const augmentRelationshipTypeFields = ({
     name: RelationshipDirectionField.TO
   });
   let relatedTypeFilterName = `_${typeName}${outputType}Filter`;
+  let relatedTypeOrderingName = `_${outputType}Ordering`;
   if (fromTypeName === toTypeName) {
     relatedTypeFilterName = `_${outputType}Filter`;
+    relatedTypeOrderingName = `_${outputType}Ordering`;
   }
   let relationshipInputTypeMap = {
     [FilteringArgument.FILTER]: {
       name: relatedTypeFilterName,
       fields: []
+    },
+    [OrderingArgument.ORDER_BY]: {
+      name: relatedTypeOrderingName,
+      values: []
     }
   };
   const propertyInputValues = [];
-  const propertyOutputFields = fields.reduce((outputFields, field) => {
+  let propertyOutputFields = fields.reduce((outputFields, field) => {
     const fieldName = field.name.value;
     const fieldDirectives = field.directives;
     if (!isIgnoredField({ directives: fieldDirectives })) {
@@ -173,6 +204,21 @@ const augmentRelationshipTypeFields = ({
           type: outputType
         })
       ) {
+        const isPrimaryKey = isPrimaryKeyField({ directives: fieldDirectives });
+        const isIndex = isIndexedField({ directives: fieldDirectives });
+        const isUnique = isUniqueField({ directives: fieldDirectives });
+        if (isPrimaryKey)
+          throw new ApolloError(
+            `The @id directive cannot be used on @relation types.`
+          );
+        if (isUnique)
+          throw new ApolloError(
+            `The @unique directive cannot be used on @relation types.`
+          );
+        if (isIndex)
+          throw new ApolloError(
+            `The @index directive cannot be used on @relation types.`
+          );
         relationshipInputTypeMap = augmentInputTypePropertyFields({
           inputTypeMap: relationshipInputTypeMap,
           fieldName,
@@ -191,6 +237,12 @@ const augmentRelationshipTypeFields = ({
     }
     return outputFields;
   }, []);
+  [propertyOutputFields, relationshipInputTypeMap] = buildNeo4jSystemIDField({
+    typeName,
+    propertyOutputFields,
+    nodeInputTypeMap: relationshipInputTypeMap,
+    config
+  });
   return [
     fromTypeName,
     toTypeName,
